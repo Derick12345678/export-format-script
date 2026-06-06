@@ -1,0 +1,300 @@
+param (
+    [Parameter(Mandatory = $true)]
+    [string]$InputFile
+)
+
+Import-Module ImportExcel
+
+# If only a file name is given, assume it is in the same folder as this script
+$scriptFolder = $PSScriptRoot
+
+if (-not [System.IO.Path]::IsPathRooted($InputFile)) {
+    $InputFile = Join-Path $scriptFolder $InputFile
+}
+
+if (-not (Test-Path $InputFile)) {
+    Write-Error "File not found: $InputFile"
+    exit 1
+}
+
+# Build output file path
+$folder = Split-Path $InputFile
+$fileNameWithoutExtension = [System.IO.Path]::GetFileNameWithoutExtension($InputFile)
+
+$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$outputFile = Join-Path $folder "$fileNameWithoutExtension`_formatted_$timestamp.xlsx"
+
+# Read Excel normally so headers are preserved
+$data = Import-Excel -Path $InputFile
+
+# Function to parse/decompose Column AA into OE groups
+function Get-OESections {
+    param (
+        [AllowNull()]
+        $CellValue
+    )
+
+    $sections = @()
+
+    if ($null -eq $CellValue) {
+        return $sections
+    }
+
+    $text = $CellValue.ToString()
+
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return $sections
+    }
+
+    # Normalize new lines
+    $text = $text -replace "`r`n", "`n"
+    $text = $text -replace "`r", "`n"
+
+    # Split on separator lines made of underscores
+    $chunks = $text -split '(?m)^\s*_+\s*$'
+
+    foreach ($chunk in $chunks) {
+
+        $lines = $chunk -split "`n" |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+
+        # Each OE section should have 4 lines
+        if ($lines.Count -ge 4) {
+            $sections += [PSCustomObject]@{
+                SDRL            = $lines[0]
+
+                # These two were swapped compared to the desired output
+                CSCNumber       = $lines[2]
+                WCNumber        = $lines[1]
+
+                DocumentSection = $lines[3]
+            }
+        }
+    }
+
+    return $sections
+}
+
+# Function to combine OE sections that have the same SDRL, CSCNumber, and WCNumber
+function Merge-OESections {
+    param (
+        [AllowNull()]
+        [array]$Sections
+    )
+
+    $mergedSections = @()
+
+    if ($null -eq $Sections -or $Sections.Count -eq 0) {
+        return $mergedSections
+    }
+
+    foreach ($section in $Sections) {
+
+        $existingSection = $mergedSections | Where-Object {
+            $_.SDRL -eq $section.SDRL -and
+            $_.CSCNumber -eq $section.CSCNumber -and
+            $_.WCNumber -eq $section.WCNumber
+        } | Select-Object -First 1
+
+        if ($null -ne $existingSection) {
+
+            $currentDocumentSection = $section.DocumentSection
+
+            # If the existing value starts with "Section", avoid repeating "Section"
+            if ($existingSection.DocumentSection -match '^\s*Section\b' -and $currentDocumentSection -match '^\s*Section\s+(.+)$') {
+                $currentDocumentSection = $matches[1]
+            }
+
+            $existingSection.DocumentSection = "$($existingSection.DocumentSection), $currentDocumentSection"
+        }
+        else {
+            $mergedSections += [PSCustomObject]@{
+                SDRL            = $section.SDRL
+                CSCNumber       = $section.CSCNumber
+                WCNumber        = $section.WCNumber
+                DocumentSection = $section.DocumentSection
+            }
+        }
+    }
+
+    return $mergedSections
+}
+
+# FIRST PASS:
+# Find the maximum number of MERGED OE sections in Column AA across all rows
+$maxOECount = 0
+
+foreach ($rowItem in $data) {
+    $properties = @($rowItem.PSObject.Properties)
+
+    $columnAA = $null
+
+    if ($properties.Count -gt 26) {
+        $columnAA = $properties[26].Value
+    }
+
+    $oeSections = @(Get-OESections -CellValue $columnAA)
+    [array]::Reverse($oeSections)
+    $mergedOESections = @(Merge-OESections -Sections $oeSections)
+
+    if ($mergedOESections.Count -gt $maxOECount) {
+        $maxOECount = $mergedOESections.Count
+    }
+}
+
+Write-Host "Maximum merged OE sections found in one row: $maxOECount"
+
+# SECOND PASS:
+# Build formatted output
+$formattedData = $data | ForEach-Object {
+
+    # Store properties safely
+    $properties = @($_.PSObject.Properties)
+
+    # Get original Column C
+    $originalColumnC = $null
+
+    if ($properties.Count -gt 2) {
+        $originalColumnC = $properties[2].Value
+    }
+
+    # Convert Column C to text safely
+    $columnCText = ""
+
+    if ($null -ne $originalColumnC) {
+        $columnCText = $originalColumnC.ToString().Trim()
+    }
+
+    # Default values for final Columns A, B, and C
+    $finalColumnA = $null
+    $finalColumnB = $null
+    $finalColumnC = $originalColumnC
+
+    # CASE 1:
+    # Original Column C starts with a decimal/double, like:
+    # 4.1 Something
+    # 4.2 Something
+    # 12.3 Something
+    if ($columnCText -match '^\s*(\d+\.\d+)\s*(.*)$') {
+
+        $numberAtStart = $matches[1]
+        $textAfterNumber = $matches[2].Trim()
+
+        # Final Column A gets the double
+        $finalColumnA = $numberAtStart
+
+        # Final Column B gets Functional Objective or Performance Requirements
+        $decimalPart = [int]($numberAtStart.Split(".")[1])
+
+        if ($decimalPart -eq 1) {
+            $finalColumnB = "Functional Objective"
+        }
+        else {
+            $finalColumnB = "Performance Requirements"
+        }
+
+        # Final Column C gets everything after the double
+        $finalColumnC = $textAfterNumber
+    }
+
+    # CASE 2:
+    # Original Column C starts with a word.
+    # Find the first number anywhere in the string.
+    else {
+        if ($columnCText -match '(\d+(\.\d+)?)') {
+
+            $firstNumber = $matches[1]
+            $numberIndex = $columnCText.IndexOf($firstNumber)
+
+            # Final Column A gets the first number
+            $finalColumnA = $firstNumber
+
+            # Final Column B gets everything after the first number
+            $finalColumnB = $columnCText.Substring($numberIndex + $firstNumber.Length).Trim()
+
+            # Final Column C stays the same as original Column C
+            $finalColumnC = $originalColumnC
+        }
+    }
+
+    # Create new output row
+    $newRow = [ordered]@{}
+
+    # Final Columns A, B, C
+    $newRow["Unique Identifier (Ruleset Number)"] = $finalColumnA
+    $newRow["Regulation"] = $finalColumnB
+    $newRow["Requirement Text"] = $finalColumnC
+
+    # Copy original Columns D through O exactly
+    for ($i = 3; $i -le 14; $i++) {
+
+        if ($i -lt $properties.Count) {
+
+            $property = $properties[$i]
+
+            if ($null -ne $property -and -not [string]::IsNullOrWhiteSpace($property.Name)) {
+                $newRow[$property.Name] = $property.Value
+            }
+        }
+    }
+
+    # Decompose original Column AA and insert OE columns right after Column O
+    # Column AA = index 26
+    $columnAA = $null
+
+    if ($properties.Count -gt 26) {
+        $columnAA = $properties[26].Value
+    }
+
+    $oeSections = @(Get-OESections -CellValue $columnAA)
+    [array]::Reverse($oeSections)
+    $mergedOESections = @(Merge-OESections -Sections $oeSections)
+
+    for ($oeIndex = 1; $oeIndex -le $maxOECount; $oeIndex++) {
+
+        $arrayIndex = $oeIndex - 1
+
+        if ($arrayIndex -lt $mergedOESections.Count) {
+            $section = $mergedOESections[$arrayIndex]
+
+            $newRow["OE $oeIndex (Add SDRL, if applicable)"] = $section.SDRL
+            $newRow["OE $oeIndex CSC# (CSC#/T26#)"] = $section.CSCNumber
+            $newRow["OE $oeIndex LMCa WC #"] = $section.WCNumber
+            $newRow["OE $oeIndex Document Section"] = $section.DocumentSection
+        }
+        else {
+            $newRow["OE $oeIndex (Add SDRL, if applicable)"] = "N/A"
+            $newRow["OE $oeIndex CSC# (CSC#/T26#)"] = "N/A"
+            $newRow["OE $oeIndex LMCa WC #"] = "N/A"
+            $newRow["OE $oeIndex Document Section"] = "N/A"
+        }
+    }
+
+    # Continue copying original Columns P through Z exactly
+    for ($i = 15; $i -le 25; $i++) {
+
+        if ($i -lt $properties.Count) {
+
+            $property = $properties[$i]
+
+            if ($null -ne $property -and -not [string]::IsNullOrWhiteSpace($property.Name)) {
+                $newRow[$property.Name] = $property.Value
+            }
+        }
+    }
+
+    [PSCustomObject]$newRow
+}
+
+# Export formatted Excel
+$formattedData | Export-Excel `
+    -Path $outputFile `
+    -WorksheetName "Formatted Data" `
+    -AutoSize `
+    -BoldTopRow `
+    -FreezeTopRow `
+    -AutoFilter
+
+Write-Host "Formatted Excel file created:"
+Write-Host $outputFile
