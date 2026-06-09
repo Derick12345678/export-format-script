@@ -67,6 +67,44 @@ function Get-SafeWorksheetName {
     return $safeName
 }
 
+# Function to check if Column C starts with "Regulation X"
+# where X is an integer.
+function Test-IsRegulationStart {
+    param (
+        [string]$Text
+    )
+
+    return ($Text -match '^\s*Regulation\s+\d+\b')
+}
+
+# Function to check if Column C starts with a double/decimal.
+# Examples:
+# 4.1 Something
+# 4.2 Something
+# 12.3 Something
+function Test-IsRequirementOrObjectiveStart {
+    param (
+        [string]$Text
+    )
+
+    return ($Text -match '^\s*\d+\.\d+\b')
+}
+
+# Function to decide if a row should be kept.
+# Keep only:
+# 1. Rows that start with "Regulation X"
+# 2. Rows that start with a double, like 4.1 or 4.2
+function Test-IsValidColumnC {
+    param (
+        [string]$Text
+    )
+
+    return (
+        (Test-IsRegulationStart -Text $Text) -or
+        (Test-IsRequirementOrObjectiveStart -Text $Text)
+    )
+}
+
 # Function to parse/decompose Column AC into OE groups
 function Get-OESections {
     param (
@@ -91,6 +129,7 @@ function Get-OESections {
     $text = $text -replace "`r", "`n"
 
     # Split on separator lines made of underscores
+    # Example separator: ____________________
     $chunks = $text -split '(?m)^\s*_+\s*$'
 
     foreach ($chunk in $chunks) {
@@ -165,27 +204,6 @@ function Merge-OESections {
     return $mergedSections
 }
 
-# Function to check if Column C contains any number
-function Test-ContainsAnyNumber {
-    param (
-        [string]$Text
-    )
-
-    return ($Text -match '\d+(\.\d+)?')
-}
-
-# Function to check if Column C contains a whole number not followed by a decimal point
-function Test-ContainsWholeNumber {
-    param (
-        [string]$Text
-    )
-
-    # Matches integers that are not part of decimals
-    # Example matches: 4, 12
-    # Example does not match: 4.1, 12.3
-    return ($Text -match '(?<![\d.])\d+(?![\d.])')
-}
-
 # Function to format one row
 function Convert-ToFormattedRow {
     param (
@@ -235,18 +253,15 @@ function Convert-ToFormattedRow {
     }
 
     # CASE 2:
-    # Original Column C does not start with a decimal/double.
-    # Find the first whole number anywhere in the string.
-    else {
-        if ($columnCText -match '(?<![\d.])(\d+)(?![\d.])') {
+    # Original Column C starts with "Regulation X"
+    elseif ($columnCText -match '^\s*Regulation\s+(\d+)\b\s*(.*)$') {
 
-            $firstNumber = $matches[1]
-            $numberIndex = $columnCText.IndexOf($firstNumber)
+        $regulationNumber = $matches[1]
+        $textAfterNumber = $matches[2].Trim()
 
-            $finalColumnA = $firstNumber
-            $finalColumnB = $columnCText.Substring($numberIndex + $firstNumber.Length).Trim()
-            $finalColumnC = $originalColumnC
-        }
+        $finalColumnA = $regulationNumber
+        $finalColumnB = $textAfterNumber
+        $finalColumnC = $originalColumnC
     }
 
     # Create new output row
@@ -281,6 +296,8 @@ function Convert-ToFormattedRow {
     }
 
     $oeSections = @(Get-OESections -CellValue $columnAC)
+
+    # No reverse anymore
     $mergedOESections = @(Merge-OESections -Sections $oeSections)
 
     for ($oeIndex = 1; $oeIndex -le $MaxOECount; $oeIndex++) {
@@ -323,7 +340,9 @@ function Convert-ToFormattedRow {
 }
 
 # STEP 1:
-# Filter out rows where Column C contains no numbers
+# Filter out rows where Column C is not either:
+# - Regulation X
+# - X.Y
 $validRows = @()
 
 foreach ($rowItem in $data) {
@@ -342,14 +361,14 @@ foreach ($rowItem in $data) {
         $columnCText = $columnC.ToString().Trim()
     }
 
-    if (Test-ContainsAnyNumber -Text $columnCText) {
+    if (Test-IsValidColumnC -Text $columnCText) {
         $validRows += $rowItem
     }
 }
 
 # STEP 2:
 # Group rows by regulation.
-# A new regulation/sheet starts when Column C contains a whole number.
+# A new regulation/sheet starts only when Column C starts with "Regulation X"
 $regulations = @()
 $currentRegulation = $null
 
@@ -369,8 +388,8 @@ foreach ($rowItem in $validRows) {
         $columnCText = $columnC.ToString().Trim()
     }
 
-    # If Column C contains a whole number, this starts a new sheet/regulation
-    if (Test-ContainsWholeNumber -Text $columnCText) {
+    # If Column C starts with "Regulation X", this starts a new sheet/regulation
+    if (Test-IsRegulationStart -Text $columnCText) {
 
         $currentRegulation = [PSCustomObject]@{
             OriginalName = $columnCText
@@ -420,6 +439,8 @@ foreach ($regulation in $regulations) {
         }
 
         $oeSections = @(Get-OESections -CellValue $columnAC)
+
+        # No reverse anymore
         $mergedOESections = @(Merge-OESections -Sections $oeSections)
 
         if ($mergedOESections.Count -gt $maxOECount) {
