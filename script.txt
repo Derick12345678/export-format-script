@@ -5,6 +5,28 @@ param (
 
 Import-Module ImportExcel
 
+function Clean-ExcelValue {
+    param (
+        [AllowNull()]
+        $Value
+    )
+
+    if ($null -eq $Value) {
+        return $null
+    }
+
+    $text = $Value.ToString()
+
+    # Remove hidden/control characters that can break Excel XML saving
+    $text = $text -replace '[\x00-\x08\x0B\x0C\x0E-\x1F]', ''
+
+    # Normalize line endings
+    $text = $text -replace "`r`n", "`n"
+    $text = $text -replace "`r", "`n"
+
+    return $text
+}
+
 # If only a file name is given, assume it is in the same folder as this script
 $scriptFolder = $PSScriptRoot
 
@@ -128,7 +150,7 @@ function Get-OESections {
         return $sections
     }
 
-    $text = $CellValue.ToString()
+    $text = Clean-ExcelValue $CellValue
 
     if ([string]::IsNullOrWhiteSpace($text)) {
         return $sections
@@ -154,10 +176,10 @@ function Get-OESections {
         # Line 4 = Document Section
         if ($lines.Count -ge 4) {
             $sections += [PSCustomObject]@{
-                SDRL            = $lines[0]
-                WCNumber        = $lines[1]
-                CSCNumber       = $lines[2]
-                DocumentSection = $lines[3]
+                SDRL            = Clean-ExcelValue $lines[0]
+                WCNumber        = Clean-ExcelValue $lines[1]
+                CSCNumber       = Clean-ExcelValue $lines[2]
+                DocumentSection = Clean-ExcelValue $lines[3]
             }
         }
 
@@ -167,10 +189,10 @@ function Get-OESections {
         # Line 3 = Document Section
         elseif ($lines.Count -eq 3) {
             $sections += [PSCustomObject]@{
-                SDRL            = $lines[0]
-                WCNumber        = $lines[1]
+                SDRL            = Clean-ExcelValue $lines[0]
+                WCNumber        = Clean-ExcelValue $lines[1]
                 CSCNumber       = "N/A"
-                DocumentSection = $lines[2]
+                DocumentSection = Clean-ExcelValue $lines[2]
             }
         }
     }
@@ -207,14 +229,14 @@ function Merge-OESections {
                 $currentDocumentSection = $matches[1]
             }
 
-            $existingSection.DocumentSection = "$($existingSection.DocumentSection), $currentDocumentSection"
+            $existingSection.DocumentSection = Clean-ExcelValue "$($existingSection.DocumentSection), $currentDocumentSection"
         }
         else {
             $mergedSections += [PSCustomObject]@{
-                SDRL            = $section.SDRL
-                CSCNumber       = $section.CSCNumber
-                WCNumber        = $section.WCNumber
-                DocumentSection = $section.DocumentSection
+                SDRL            = Clean-ExcelValue $section.SDRL
+                CSCNumber       = Clean-ExcelValue $section.CSCNumber
+                WCNumber        = Clean-ExcelValue $section.WCNumber
+                DocumentSection = Clean-ExcelValue $section.DocumentSection
             }
         }
     }
@@ -240,7 +262,7 @@ function Convert-ToFormattedRow {
     $columnCText = ""
 
     if ($null -ne $originalColumnC) {
-        $columnCText = $originalColumnC.ToString().Trim()
+        $columnCText = (Clean-ExcelValue $originalColumnC).Trim()
     }
 
     $finalColumnA = $null
@@ -281,9 +303,9 @@ function Convert-ToFormattedRow {
     $newRow = [ordered]@{}
 
     # New Columns A, B, C
-    $newRow["Unique Identifier (Ruleset Number)"] = $finalColumnA
-    $newRow["Regulation"] = $finalColumnB
-    $newRow["Requirement Text"] = $finalColumnC
+    $newRow["Unique Identifier (Ruleset Number)"] = Clean-ExcelValue $finalColumnA
+    $newRow["Regulation"] = Clean-ExcelValue $finalColumnB
+    $newRow["Requirement Text"] = Clean-ExcelValue $finalColumnC
 
     # Copy original Columns D through O exactly
     # D = index 3
@@ -295,7 +317,7 @@ function Convert-ToFormattedRow {
             $property = $properties[$i]
 
             if ($null -ne $property -and -not [string]::IsNullOrWhiteSpace($property.Name)) {
-                $newRow[$property.Name] = $property.Value
+                $newRow[$property.Name] = Clean-ExcelValue $property.Value
             }
         }
     }
@@ -318,10 +340,10 @@ function Convert-ToFormattedRow {
         if ($arrayIndex -lt $mergedOESections.Count) {
             $section = $mergedOESections[$arrayIndex]
 
-            $newRow["OE $oeIndex (Add SDRL, if applicable)"] = $section.SDRL
-            $newRow["OE $oeIndex CSC# (CSC#/T26#)"] = $section.CSCNumber
-            $newRow["OE $oeIndex LMCa WC #"] = $section.WCNumber
-            $newRow["OE $oeIndex Document Section"] = $section.DocumentSection
+            $newRow["OE $oeIndex (Add SDRL, if applicable)"] = Clean-ExcelValue $section.SDRL
+            $newRow["OE $oeIndex CSC# (CSC#/T26#)"] = Clean-ExcelValue $section.CSCNumber
+            $newRow["OE $oeIndex LMCa WC #"] = Clean-ExcelValue $section.WCNumber
+            $newRow["OE $oeIndex Document Section"] = Clean-ExcelValue $section.DocumentSection
         }
         else {
             $newRow["OE $oeIndex (Add SDRL, if applicable)"] = "N/A"
@@ -342,7 +364,7 @@ function Convert-ToFormattedRow {
             $property = $properties[$i]
 
             if ($null -ne $property -and -not [string]::IsNullOrWhiteSpace($property.Name)) {
-                $newRow[$property.Name] = $property.Value
+                $newRow[$property.Name] = Clean-ExcelValue $property.Value
             }
         }
     }
@@ -369,7 +391,7 @@ foreach ($rowItem in $data) {
     $columnCText = ""
 
     if ($null -ne $columnC) {
-        $columnCText = $columnC.ToString().Trim()
+        $columnCText = (Clean-ExcelValue $columnC).Trim()
     }
 
     if (Test-IsValidColumnC -Text $columnCText) {
@@ -396,7 +418,7 @@ foreach ($rowItem in $validRows) {
     $columnCText = ""
 
     if ($null -ne $columnC) {
-        $columnCText = $columnC.ToString().Trim()
+        $columnCText = (Clean-ExcelValue $columnC).Trim()
     }
 
     if (Test-IsRegulationStart -Text $columnCText) {
@@ -477,7 +499,6 @@ try {
         $formattedRows | Export-Excel `
             -ExcelPackage $excelPackage `
             -WorksheetName $worksheetName `
-            -AutoSize `
             -BoldTopRow `
             -FreezeTopRow `
             -AutoFilter
