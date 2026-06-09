@@ -1,60 +1,509 @@
-function Write-WorksheetManually {
+param (
+    [Parameter(Mandatory = $true)]
+    [string]$InputFile
+)
+
+Import-Module ImportExcel
+
+# -----------------------------
+# CONFIG
+# -----------------------------
+
+$ColumnCIndex  = 2
+$ColumnACIndex = 28
+
+$CopyBeforeOEStart = 3    # D
+$CopyBeforeOEEnd   = 14   # O
+
+$CopyAfterOEStart  = 15   # P
+$CopyAfterOEEnd    = 27   # AB
+
+# -----------------------------
+# PATH SETUP
+# -----------------------------
+
+$scriptFolder = $PSScriptRoot
+
+if (-not [System.IO.Path]::IsPathRooted($InputFile)) {
+    $InputFile = Join-Path $scriptFolder $InputFile
+}
+
+if (-not (Test-Path $InputFile)) {
+    Write-Error "File not found: $InputFile"
+    exit 1
+}
+
+$folder = Split-Path $InputFile
+$fileNameWithoutExtension = [System.IO.Path]::GetFileNameWithoutExtension($InputFile)
+$timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
+
+$outputFile = Join-Path $folder "$fileNameWithoutExtension`_formatted_$timestamp.xlsx"
+
+if (Test-Path $outputFile) {
+    Remove-Item $outputFile -Force
+}
+
+# -----------------------------
+# HELPER FUNCTIONS
+# -----------------------------
+
+function Clean-Value {
     param (
-        $ExcelPackage,
-        [string]$WorksheetName,
+        [AllowNull()]
+        $Value
+    )
+
+    if ($null -eq $Value) {
+        return $null
+    }
+
+    $text = $Value.ToString()
+
+    # Remove hidden/control characters that can break Excel XML
+    $text = $text -replace '[\x00-\x08\x0B\x0C\x0E-\x1F]', ''
+
+    # Normalize line endings
+    $text = $text -replace "`r`n", "`n"
+    $text = $text -replace "`r", "`n"
+
+    return $text
+}
+
+function Get-ColumnValue {
+    param (
+        $Row,
+        [int]$Index
+    )
+
+    $properties = @($Row.PSObject.Properties)
+
+    if ($Index -lt $properties.Count) {
+        return $properties[$Index].Value
+    }
+
+    return $null
+}
+
+function Get-ColumnProperty {
+    param (
+        $Row,
+        [int]$Index
+    )
+
+    $properties = @($Row.PSObject.Properties)
+
+    if ($Index -lt $properties.Count) {
+        return $properties[$Index]
+    }
+
+    return $null
+}
+
+function Test-IsRegulationStart {
+    param (
+        [string]$Text
+    )
+
+    return ($Text -match '^\s*Regulation\s+\d+\b')
+}
+
+function Test-IsRequirementStart {
+    param (
+        [string]$Text
+    )
+
+    return ($Text -match '^\s*\d+\.\d+\b')
+}
+
+function Test-IsValidColumnC {
+    param (
+        [string]$Text
+    )
+
+    return (
+        (Test-IsRegulationStart $Text) -or
+        (Test-IsRequirementStart $Text)
+    )
+}
+
+function Get-RegulationSheetName {
+    param (
+        [string]$Text
+    )
+
+    if ($Text -match '^\s*Regulation\s+(\d+)\b') {
+        return "Regulation $($matches[1])"
+    }
+
+    return $null
+}
+
+function Get-SafeWorksheetName {
+    param (
+        [string]$Name,
+        [hashtable]$UsedNames
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Name)) {
+        $Name = "Sheet"
+    }
+
+    $safeName = $Name -replace '[\\\/\?\*\[\]\:]', '-'
+    $safeName = $safeName.Trim("'").Trim()
+
+    if ($safeName.Length -gt 31) {
+        $safeName = $safeName.Substring(0, 31)
+    }
+
+    $baseName = $safeName
+    $counter = 2
+
+    while ($UsedNames.ContainsKey($safeName)) {
+        $suffix = " ($counter)"
+        $maxLength = 31 - $suffix.Length
+
+        if ($baseName.Length -gt $maxLength) {
+            $safeName = $baseName.Substring(0, $maxLength) + $suffix
+        }
+        else {
+            $safeName = $baseName + $suffix
+        }
+
+        $counter++
+    }
+
+    $UsedNames[$safeName] = $true
+    return $safeName
+}
+
+# -----------------------------
+# COLUMN C PARSING
+# -----------------------------
+
+function Get-ColumnCParts {
+    param (
+        [AllowNull()]
+        $Value
+    )
+
+    $text = ""
+
+    if ($null -ne $Value) {
+        $text = (Clean-Value $Value).Trim()
+    }
+
+    $result = [ordered]@{
+        UniqueIdentifier = $null
+        Regulation       = $null
+        RequirementText  = $Value
+    }
+
+    # Requirement/objective row: starts with X.Y
+    if ($text -match '^\s*(\d+\.\d+)\s*(.*)$') {
+        $identifier = $matches[1]
+        $remainingText = $matches[2].Trim()
+
+        $decimalPart = [int]($identifier.Split(".")[1])
+
+        $result.UniqueIdentifier = $identifier
+        $result.Regulation = if ($decimalPart -eq 1) {
+            "Functional Objective"
+        }
+        else {
+            "Performance Requirements"
+        }
+        $result.RequirementText = $remainingText
+    }
+
+    # Regulation row: starts with Regulation X
+    elseif ($text -match '^\s*Regulation\s+(\d+)\b\s*(.*)$') {
+        $result.UniqueIdentifier = $matches[1]
+        $result.Regulation = $matches[2].Trim()
+        $result.RequirementText = $Value
+    }
+
+    return [PSCustomObject]$result
+}
+
+# -----------------------------
+# OE PARSING
+# -----------------------------
+
+function Get-OESections {
+    param (
+        [AllowNull()]
+        $CellValue
+    )
+
+    $sections = @()
+
+    if ($null -eq $CellValue) {
+        return $sections
+    }
+
+    $text = Clean-Value $CellValue
+
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return $sections
+    }
+
+    $chunks = $text -split '(?m)^\s*_+\s*$'
+
+    foreach ($chunk in $chunks) {
+        $lines = $chunk -split "`n" |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+
+        if ($lines.Count -ge 4) {
+            $sections += [PSCustomObject]@{
+                SDRL            = Clean-Value $lines[0]
+                WCNumber        = Clean-Value $lines[1]
+                CSCNumber       = Clean-Value $lines[2]
+                DocumentSection = Clean-Value $lines[3]
+            }
+        }
+        elseif ($lines.Count -eq 3) {
+            $sections += [PSCustomObject]@{
+                SDRL            = Clean-Value $lines[0]
+                WCNumber        = Clean-Value $lines[1]
+                CSCNumber       = "N/A"
+                DocumentSection = Clean-Value $lines[2]
+            }
+        }
+    }
+
+    return $sections
+}
+
+function Merge-OESections {
+    param (
+        [array]$Sections
+    )
+
+    $merged = @()
+
+    foreach ($section in $Sections) {
+        $existing = $merged | Where-Object {
+            $_.SDRL -eq $section.SDRL -and
+            $_.CSCNumber -eq $section.CSCNumber -and
+            $_.WCNumber -eq $section.WCNumber
+        } | Select-Object -First 1
+
+        if ($null -ne $existing) {
+            $newDocSection = $section.DocumentSection
+
+            if (
+                $existing.DocumentSection -match '^\s*Section\b' -and
+                $newDocSection -match '^\s*Section\s+(.+)$'
+            ) {
+                $newDocSection = $matches[1]
+            }
+
+            $existing.DocumentSection = Clean-Value "$($existing.DocumentSection), $newDocSection"
+        }
+        else {
+            $merged += [PSCustomObject]@{
+                SDRL            = $section.SDRL
+                CSCNumber       = $section.CSCNumber
+                WCNumber        = $section.WCNumber
+                DocumentSection = $section.DocumentSection
+            }
+        }
+    }
+
+    return $merged
+}
+
+function Get-MergedOEsFromRow {
+    param (
+        $Row
+    )
+
+    $columnAC = Get-ColumnValue -Row $Row -Index $ColumnACIndex
+    $sections = @(Get-OESections -CellValue $columnAC)
+    return @(Merge-OESections -Sections $sections)
+}
+
+# -----------------------------
+# ROW CONVERSION
+# -----------------------------
+
+function Add-OriginalColumns {
+    param (
+        [ordered]$NewRow,
+        $OriginalRow,
+        [int]$StartIndex,
+        [int]$EndIndex
+    )
+
+    for ($i = $StartIndex; $i -le $EndIndex; $i++) {
+        $property = Get-ColumnProperty -Row $OriginalRow -Index $i
+
+        if ($null -ne $property -and -not [string]::IsNullOrWhiteSpace($property.Name)) {
+            $NewRow[$property.Name] = Clean-Value $property.Value
+        }
+    }
+}
+
+function Convert-ToFormattedRow {
+    param (
+        $OriginalRow,
+        [int]$MaxOECount
+    )
+
+    $columnC = Get-ColumnValue -Row $OriginalRow -Index $ColumnCIndex
+    $columnCParts = Get-ColumnCParts -Value $columnC
+
+    $newRow = [ordered]@{}
+
+    $newRow["Unique Identifier (Ruleset Number)"] = Clean-Value $columnCParts.UniqueIdentifier
+    $newRow["Regulation"] = Clean-Value $columnCParts.Regulation
+    $newRow["Requirement Text"] = Clean-Value $columnCParts.RequirementText
+
+    Add-OriginalColumns `
+        -NewRow $newRow `
+        -OriginalRow $OriginalRow `
+        -StartIndex $CopyBeforeOEStart `
+        -EndIndex $CopyBeforeOEEnd
+
+    $mergedOEs = @(Get-MergedOEsFromRow -Row $OriginalRow)
+
+    for ($i = 1; $i -le $MaxOECount; $i++) {
+        $oeArrayIndex = $i - 1
+
+        if ($oeArrayIndex -lt $mergedOEs.Count) {
+            $oe = $mergedOEs[$oeArrayIndex]
+
+            $newRow["OE $i (Add SDRL, if applicable)"] = Clean-Value $oe.SDRL
+            $newRow["OE $i CSC# (CSC#/T26#)"] = Clean-Value $oe.CSCNumber
+            $newRow["OE $i LMCa WC #"] = Clean-Value $oe.WCNumber
+            $newRow["OE $i Document Section"] = Clean-Value $oe.DocumentSection
+        }
+        else {
+            $newRow["OE $i (Add SDRL, if applicable)"] = "N/A"
+            $newRow["OE $i CSC# (CSC#/T26#)"] = "N/A"
+            $newRow["OE $i LMCa WC #"] = "N/A"
+            $newRow["OE $i Document Section"] = "N/A"
+        }
+    }
+
+    Add-OriginalColumns `
+        -NewRow $newRow `
+        -OriginalRow $OriginalRow `
+        -StartIndex $CopyAfterOEStart `
+        -EndIndex $CopyAfterOEEnd
+
+    return [PSCustomObject]$newRow
+}
+
+# -----------------------------
+# GROUPING
+# -----------------------------
+
+function Get-RegulationGroups {
+    param (
         [array]$Rows
     )
 
-    if ($null -eq $Rows -or $Rows.Count -eq 0) {
-        Write-Host "No rows to write for worksheet: $WorksheetName"
-        return
-    }
-
-    # Delete existing sheet with same name if it somehow exists
-    $existingSheet = $ExcelPackage.Workbook.Worksheets[$WorksheetName]
-    if ($null -ne $existingSheet) {
-        $ExcelPackage.Workbook.Worksheets.Delete($WorksheetName)
-    }
-
-    # Create worksheet
-    $worksheet = $ExcelPackage.Workbook.Worksheets.Add($WorksheetName)
-
-    # Get headers from first row
-    $headers = @($Rows[0].PSObject.Properties.Name)
-
-    # Write headers
-    for ($col = 0; $col -lt $headers.Count; $col++) {
-        $worksheet.Cells[1, $col + 1].SetValue($headers[$col])
-        $worksheet.Cells[1, $col + 1].Style.Font.Bold = $true
-    }
-
-    # Write data rows
-    $rowNumber = 2
+    $groups = @()
+    $currentGroup = $null
 
     foreach ($row in $Rows) {
-        for ($col = 0; $col -lt $headers.Count; $col++) {
-            $header = $headers[$col]
-            $value = $row.PSObject.Properties[$header].Value
+        $columnC = Get-ColumnValue -Row $row -Index $ColumnCIndex
+        $columnCText = ""
 
-            $worksheet.Cells[$rowNumber, $col + 1].SetValue((Clean-ExcelValue $value))
+        if ($null -ne $columnC) {
+            $columnCText = (Clean-Value $columnC).Trim()
         }
 
-        $rowNumber++
+        if (-not (Test-IsValidColumnC $columnCText)) {
+            continue
+        }
+
+        if (Test-IsRegulationStart $columnCText) {
+            $currentGroup = [PSCustomObject]@{
+                Name      = $columnCText
+                SheetName = Get-RegulationSheetName $columnCText
+                Rows      = @()
+            }
+
+            $groups += $currentGroup
+        }
+
+        if ($null -ne $currentGroup) {
+            $currentGroup.Rows += $row
+        }
     }
 
-    # Freeze top row
-    $worksheet.View.FreezePanes(2, 1)
+    return $groups
+}
 
-    # Add autofilter
-    $lastRow = $Rows.Count + 1
-    $lastCol = $headers.Count
+function Get-MaxOECount {
+    param (
+        [array]$Rows
+    )
 
-    if ($lastRow -ge 1 -and $lastCol -ge 1) {
-        $worksheet.Cells[1, 1, $lastRow, $lastCol].AutoFilter = $true
+    $max = 0
+
+    foreach ($row in $Rows) {
+        $count = @(Get-MergedOEsFromRow -Row $row).Count
+
+        if ($count -gt $max) {
+            $max = $count
+        }
     }
 
-    # Basic width, safer than AutoSize
-    for ($col = 1; $col -le $lastCol; $col++) {
-        $worksheet.Column($col).Width = 20
+    return $max
+}
+
+# -----------------------------
+# MAIN SCRIPT
+# -----------------------------
+
+$data = Import-Excel -Path $InputFile
+$groups = @(Get-RegulationGroups -Rows $data)
+
+if ($groups.Count -eq 0) {
+    Write-Error "No regulation groups found. No output file was created."
+    exit 1
+}
+
+$usedSheetNames = @{}
+$firstSheet = $true
+
+foreach ($group in $groups) {
+    $maxOECount = Get-MaxOECount -Rows $group.Rows
+    $worksheetName = Get-SafeWorksheetName -Name $group.SheetName -UsedNames $usedSheetNames
+
+    Write-Host "Exporting worksheet: $worksheetName"
+    Write-Host "Regulation '$($group.Name)' max OE count: $maxOECount"
+
+    $formattedRows = @()
+
+    foreach ($row in $group.Rows) {
+        $formattedRows += Convert-ToFormattedRow -OriginalRow $row -MaxOECount $maxOECount
+    }
+
+    if ($firstSheet) {
+        $formattedRows | Export-Excel `
+            -Path $outputFile `
+            -WorksheetName $worksheetName `
+            -BoldTopRow `
+            -FreezeTopRow `
+            -AutoFilter
+
+        $firstSheet = $false
+    }
+    else {
+        $formattedRows | Export-Excel `
+            -Path $outputFile `
+            -WorksheetName $worksheetName `
+            -BoldTopRow `
+            -FreezeTopRow `
+            -AutoFilter `
+            -Append
     }
 }
+
+Write-Host "Formatted Excel file created:"
+Write-Host $outputFile
