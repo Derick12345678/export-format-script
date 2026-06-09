@@ -37,10 +37,18 @@ $folder = Split-Path $InputFile
 $fileNameWithoutExtension = [System.IO.Path]::GetFileNameWithoutExtension($InputFile)
 $timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
 
+# Final output goes beside the original Excel file
 $outputFile = Join-Path $folder "$fileNameWithoutExtension`_formatted_$timestamp.xlsx"
+
+# Temporary output is created locally first to avoid network/shared-drive save issues
+$tempOutputFile = Join-Path $env:TEMP "$fileNameWithoutExtension`_formatted_$timestamp.xlsx"
 
 if (Test-Path $outputFile) {
     Remove-Item $outputFile -Force
+}
+
+if (Test-Path $tempOutputFile) {
+    Remove-Item $tempOutputFile -Force
 }
 
 # -----------------------------
@@ -503,7 +511,7 @@ foreach ($group in $groups) {
 
     if ($firstSheet) {
         $formattedRows | Export-Excel `
-            -Path $outputFile `
+            -Path $tempOutputFile `
             -WorksheetName $worksheetName `
             -BoldTopRow `
             -FreezeTopRow `
@@ -513,13 +521,21 @@ foreach ($group in $groups) {
     }
     else {
         $formattedRows | Export-Excel `
-            -Path $outputFile `
+            -Path $tempOutputFile `
             -WorksheetName $worksheetName `
             -BoldTopRow `
             -FreezeTopRow `
             -AutoFilter `
             -Append
     }
+}
+
+# Copy completed workbook from local temp folder back to the original/network folder
+Copy-Item -Path $tempOutputFile -Destination $outputFile -Force
+
+# Clean up temp file
+if (Test-Path $tempOutputFile) {
+    Remove-Item $tempOutputFile -Force
 }
 
 Write-Host "Formatted Excel file created:"
