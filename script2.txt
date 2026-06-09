@@ -1,0 +1,467 @@
+param (
+    [Parameter(Mandatory = $true)]
+    [string]$InputFile
+)
+
+Import-Module ImportExcel
+
+# If only a file name is given, assume it is in the same folder as this script
+$scriptFolder = $PSScriptRoot
+
+if (-not [System.IO.Path]::IsPathRooted($InputFile)) {
+    $InputFile = Join-Path $scriptFolder $InputFile
+}
+
+if (-not (Test-Path $InputFile)) {
+    Write-Error "File not found: $InputFile"
+    exit 1
+}
+
+# Build output file path
+$folder = Split-Path $InputFile
+$fileNameWithoutExtension = [System.IO.Path]::GetFileNameWithoutExtension($InputFile)
+
+$timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
+$outputFile = Join-Path $folder "$fileNameWithoutExtension`_formatted_$timestamp.xlsx"
+
+# Read Excel normally so headers are preserved
+$data = Import-Excel -Path $InputFile
+
+# Function to create safe Excel worksheet names
+function Get-SafeWorksheetName {
+    param (
+        [string]$Name,
+        [hashtable]$UsedNames
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Name)) {
+        $Name = "Sheet"
+    }
+
+    # Excel worksheet names cannot contain: \ / ? * [ ]
+    $safeName = $Name -replace '[\\\/\?\*\[\]]', '-'
+
+    # Excel worksheet names have a 31-character limit
+    if ($safeName.Length -gt 31) {
+        $safeName = $safeName.Substring(0, 31)
+    }
+
+    $baseName = $safeName
+    $counter = 2
+
+    while ($UsedNames.ContainsKey($safeName)) {
+        $suffix = " ($counter)"
+        $maxBaseLength = 31 - $suffix.Length
+
+        if ($baseName.Length -gt $maxBaseLength) {
+            $safeName = $baseName.Substring(0, $maxBaseLength) + $suffix
+        }
+        else {
+            $safeName = $baseName + $suffix
+        }
+
+        $counter++
+    }
+
+    $UsedNames[$safeName] = $true
+    return $safeName
+}
+
+# Function to parse/decompose Column AC into OE groups
+function Get-OESections {
+    param (
+        [AllowNull()]
+        $CellValue
+    )
+
+    $sections = @()
+
+    if ($null -eq $CellValue) {
+        return $sections
+    }
+
+    $text = $CellValue.ToString()
+
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return $sections
+    }
+
+    # Normalize new lines
+    $text = $text -replace "`r`n", "`n"
+    $text = $text -replace "`r", "`n"
+
+    # Split on separator lines made of underscores
+    $chunks = $text -split '(?m)^\s*_+\s*$'
+
+    foreach ($chunk in $chunks) {
+
+        $lines = $chunk -split "`n" |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+
+        # Each OE section should have 4 lines
+        if ($lines.Count -ge 4) {
+            $sections += [PSCustomObject]@{
+                SDRL            = $lines[0]
+
+                # These are intentionally mapped this way based on your correction
+                CSCNumber       = $lines[2]
+                WCNumber        = $lines[1]
+
+                DocumentSection = $lines[3]
+            }
+        }
+    }
+
+    return $sections
+}
+
+# Function to combine OE sections that have the same SDRL, CSCNumber, and WCNumber
+function Merge-OESections {
+    param (
+        [AllowNull()]
+        [array]$Sections
+    )
+
+    $mergedSections = @()
+
+    if ($null -eq $Sections -or $Sections.Count -eq 0) {
+        return $mergedSections
+    }
+
+    foreach ($section in $Sections) {
+
+        $existingSection = $mergedSections | Where-Object {
+            $_.SDRL -eq $section.SDRL -and
+            $_.CSCNumber -eq $section.CSCNumber -and
+            $_.WCNumber -eq $section.WCNumber
+        } | Select-Object -First 1
+
+        if ($null -ne $existingSection) {
+
+            $currentDocumentSection = $section.DocumentSection
+
+            # Avoid repeating the word "Section"
+            # Example:
+            # Section 10.4.2.1 + Section 10.4.3.2
+            # becomes:
+            # Section 10.4.2.1, 10.4.3.2
+            if ($existingSection.DocumentSection -match '^\s*Section\b' -and $currentDocumentSection -match '^\s*Section\s+(.+)$') {
+                $currentDocumentSection = $matches[1]
+            }
+
+            $existingSection.DocumentSection = "$($existingSection.DocumentSection), $currentDocumentSection"
+        }
+        else {
+            $mergedSections += [PSCustomObject]@{
+                SDRL            = $section.SDRL
+                CSCNumber       = $section.CSCNumber
+                WCNumber        = $section.WCNumber
+                DocumentSection = $section.DocumentSection
+            }
+        }
+    }
+
+    return $mergedSections
+}
+
+# Function to check if Column C contains any number
+function Test-ContainsAnyNumber {
+    param (
+        [string]$Text
+    )
+
+    return ($Text -match '\d+(\.\d+)?')
+}
+
+# Function to check if Column C contains a whole number not followed by a decimal point
+function Test-ContainsWholeNumber {
+    param (
+        [string]$Text
+    )
+
+    # Matches integers that are not part of decimals
+    # Example matches: 4, 12
+    # Example does not match: 4.1, 12.3
+    return ($Text -match '(?<![\d.])\d+(?![\d.])')
+}
+
+# Function to format one row
+function Convert-ToFormattedRow {
+    param (
+        $OriginalRow,
+        [int]$MaxOECount
+    )
+
+    $properties = @($OriginalRow.PSObject.Properties)
+
+    # Original Column C = index 2
+    $originalColumnC = $null
+
+    if ($properties.Count -gt 2) {
+        $originalColumnC = $properties[2].Value
+    }
+
+    $columnCText = ""
+
+    if ($null -ne $originalColumnC) {
+        $columnCText = $originalColumnC.ToString().Trim()
+    }
+
+    # Default values for final Columns A, B, and C
+    $finalColumnA = $null
+    $finalColumnB = $null
+    $finalColumnC = $originalColumnC
+
+    # CASE 1:
+    # Original Column C starts with a decimal/double, like 4.1, 4.2, 12.3
+    if ($columnCText -match '^\s*(\d+\.\d+)\s*(.*)$') {
+
+        $numberAtStart = $matches[1]
+        $textAfterNumber = $matches[2].Trim()
+
+        $finalColumnA = $numberAtStart
+
+        $decimalPart = [int]($numberAtStart.Split(".")[1])
+
+        if ($decimalPart -eq 1) {
+            $finalColumnB = "Functional Objective"
+        }
+        else {
+            $finalColumnB = "Performance Requirements"
+        }
+
+        $finalColumnC = $textAfterNumber
+    }
+
+    # CASE 2:
+    # Original Column C does not start with a decimal/double.
+    # Find the first whole number anywhere in the string.
+    else {
+        if ($columnCText -match '(?<![\d.])(\d+)(?![\d.])') {
+
+            $firstNumber = $matches[1]
+            $numberIndex = $columnCText.IndexOf($firstNumber)
+
+            $finalColumnA = $firstNumber
+            $finalColumnB = $columnCText.Substring($numberIndex + $firstNumber.Length).Trim()
+            $finalColumnC = $originalColumnC
+        }
+    }
+
+    # Create new output row
+    $newRow = [ordered]@{}
+
+    # Final Columns A, B, C
+    $newRow["Unique Identifier (Ruleset Number)"] = $finalColumnA
+    $newRow["Regulation"] = $finalColumnB
+    $newRow["Requirement Text"] = $finalColumnC
+
+    # Copy original Columns D through O exactly
+    # D = index 3
+    # O = index 14
+    for ($i = 3; $i -le 14; $i++) {
+
+        if ($i -lt $properties.Count) {
+
+            $property = $properties[$i]
+
+            if ($null -ne $property -and -not [string]::IsNullOrWhiteSpace($property.Name)) {
+                $newRow[$property.Name] = $property.Value
+            }
+        }
+    }
+
+    # Decompose original Column AC and insert OE columns after original Column O
+    # AC = index 28
+    $columnAC = $null
+
+    if ($properties.Count -gt 28) {
+        $columnAC = $properties[28].Value
+    }
+
+    $oeSections = @(Get-OESections -CellValue $columnAC)
+    $mergedOESections = @(Merge-OESections -Sections $oeSections)
+
+    for ($oeIndex = 1; $oeIndex -le $MaxOECount; $oeIndex++) {
+
+        $arrayIndex = $oeIndex - 1
+
+        if ($arrayIndex -lt $mergedOESections.Count) {
+            $section = $mergedOESections[$arrayIndex]
+
+            $newRow["OE $oeIndex (Add SDRL, if applicable)"] = $section.SDRL
+            $newRow["OE $oeIndex CSC# (CSC#/T26#)"] = $section.CSCNumber
+            $newRow["OE $oeIndex LMCa WC #"] = $section.WCNumber
+            $newRow["OE $oeIndex Document Section"] = $section.DocumentSection
+        }
+        else {
+            $newRow["OE $oeIndex (Add SDRL, if applicable)"] = "N/A"
+            $newRow["OE $oeIndex CSC# (CSC#/T26#)"] = "N/A"
+            $newRow["OE $oeIndex LMCa WC #"] = "N/A"
+            $newRow["OE $oeIndex Document Section"] = "N/A"
+        }
+    }
+
+    # Continue copying original Columns P through AB exactly
+    # P = index 15
+    # AB = index 27
+    # Do NOT copy AC or anything after AC
+    for ($i = 15; $i -le 27; $i++) {
+
+        if ($i -lt $properties.Count) {
+
+            $property = $properties[$i]
+
+            if ($null -ne $property -and -not [string]::IsNullOrWhiteSpace($property.Name)) {
+                $newRow[$property.Name] = $property.Value
+            }
+        }
+    }
+
+    return [PSCustomObject]$newRow
+}
+
+# STEP 1:
+# Filter out rows where Column C contains no numbers
+$validRows = @()
+
+foreach ($rowItem in $data) {
+
+    $properties = @($rowItem.PSObject.Properties)
+
+    $columnC = $null
+
+    if ($properties.Count -gt 2) {
+        $columnC = $properties[2].Value
+    }
+
+    $columnCText = ""
+
+    if ($null -ne $columnC) {
+        $columnCText = $columnC.ToString().Trim()
+    }
+
+    if (Test-ContainsAnyNumber -Text $columnCText) {
+        $validRows += $rowItem
+    }
+}
+
+# STEP 2:
+# Group rows by regulation.
+# A new regulation/sheet starts when Column C contains a whole number.
+$regulations = @()
+$currentRegulation = $null
+
+foreach ($rowItem in $validRows) {
+
+    $properties = @($rowItem.PSObject.Properties)
+
+    $columnC = $null
+
+    if ($properties.Count -gt 2) {
+        $columnC = $properties[2].Value
+    }
+
+    $columnCText = ""
+
+    if ($null -ne $columnC) {
+        $columnCText = $columnC.ToString().Trim()
+    }
+
+    # If Column C contains a whole number, this starts a new sheet/regulation
+    if (Test-ContainsWholeNumber -Text $columnCText) {
+
+        $currentRegulation = [PSCustomObject]@{
+            OriginalName = $columnCText
+            Rows         = @()
+        }
+
+        $regulations += $currentRegulation
+    }
+
+    # Ignore rows before the first regulation
+    if ($null -ne $currentRegulation) {
+        $currentRegulation.Rows += $rowItem
+    }
+}
+
+# Stop if no regulations were found
+if ($regulations.Count -eq 0) {
+    Write-Error "No regulation rows found. No output file was created."
+    exit 1
+}
+
+# If output file somehow already exists, delete it first
+if (Test-Path $outputFile) {
+    Remove-Item $outputFile -Force
+}
+
+# STEP 3:
+# Create one sheet per regulation.
+# OE max count is calculated separately for each regulation.
+$usedSheetNames = @{}
+$firstSheet = $true
+
+foreach ($regulation in $regulations) {
+
+    # Find max OE count for this regulation only
+    $maxOECount = 0
+
+    foreach ($rowItem in $regulation.Rows) {
+
+        $properties = @($rowItem.PSObject.Properties)
+
+        # Column AC = index 28
+        $columnAC = $null
+
+        if ($properties.Count -gt 28) {
+            $columnAC = $properties[28].Value
+        }
+
+        $oeSections = @(Get-OESections -CellValue $columnAC)
+        $mergedOESections = @(Merge-OESections -Sections $oeSections)
+
+        if ($mergedOESections.Count -gt $maxOECount) {
+            $maxOECount = $mergedOESections.Count
+        }
+    }
+
+    Write-Host "Regulation '$($regulation.OriginalName)' max OE count: $maxOECount"
+
+    # Format all rows in this regulation
+    $formattedRows = @()
+
+    foreach ($rowItem in $regulation.Rows) {
+        $formattedRows += Convert-ToFormattedRow -OriginalRow $rowItem -MaxOECount $maxOECount
+    }
+
+    # Create safe worksheet name
+    $worksheetName = Get-SafeWorksheetName -Name $regulation.OriginalName -UsedNames $usedSheetNames
+
+    # Export to its own sheet
+    if ($firstSheet) {
+        $formattedRows | Export-Excel `
+            -Path $outputFile `
+            -WorksheetName $worksheetName `
+            -AutoSize `
+            -BoldTopRow `
+            -FreezeTopRow `
+            -AutoFilter
+
+        $firstSheet = $false
+    }
+    else {
+        $formattedRows | Export-Excel `
+            -Path $outputFile `
+            -WorksheetName $worksheetName `
+            -AutoSize `
+            -BoldTopRow `
+            -FreezeTopRow `
+            -AutoFilter `
+            -Append
+    }
+}
+
+Write-Host "Formatted Excel file created:"
+Write-Host $outputFile
