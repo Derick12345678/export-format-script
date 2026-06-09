@@ -121,8 +121,8 @@ function Test-IsValidColumnC {
     )
 
     return (
-        (Test-IsRegulationStart $Text) -or
-        (Test-IsRequirementStart $Text)
+        (Test-IsRegulationStart -Text $Text) -or
+        (Test-IsRequirementStart -Text $Text)
     )
 }
 
@@ -148,8 +148,13 @@ function Get-SafeWorksheetName {
         $Name = "Sheet"
     }
 
+    # Excel worksheet names cannot contain: \ / ? * [ ] :
     $safeName = $Name -replace '[\\\/\?\*\[\]\:]', '-'
     $safeName = $safeName.Trim("'").Trim()
+
+    if ([string]::IsNullOrWhiteSpace($safeName)) {
+        $safeName = "Sheet"
+    }
 
     if ($safeName.Length -gt 31) {
         $safeName = $safeName.Substring(0, 31)
@@ -206,12 +211,14 @@ function Get-ColumnCParts {
         $decimalPart = [int]($identifier.Split(".")[1])
 
         $result.UniqueIdentifier = $identifier
-        $result.Regulation = if ($decimalPart -eq 1) {
-            "Functional Objective"
+
+        if ($decimalPart -eq 1) {
+            $result.Regulation = "Functional Objective"
         }
         else {
-            "Performance Requirements"
+            $result.Regulation = "Performance Requirements"
         }
+
         $result.RequirementText = $remainingText
     }
 
@@ -254,6 +261,11 @@ function Get-OESections {
             ForEach-Object { $_.Trim() } |
             Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
 
+        # Normal case:
+        # Line 1 = SDRL
+        # Line 2 = WC#
+        # Line 3 = CSC#
+        # Line 4 = Document Section
         if ($lines.Count -ge 4) {
             $sections += [PSCustomObject]@{
                 SDRL            = Clean-Value $lines[0]
@@ -262,6 +274,11 @@ function Get-OESections {
                 DocumentSection = Clean-Value $lines[3]
             }
         }
+
+        # Missing CSC# case:
+        # Line 1 = SDRL
+        # Line 2 = WC#
+        # Line 3 = Document Section
         elseif ($lines.Count -eq 3) {
             $sections += [PSCustomObject]@{
                 SDRL            = Clean-Value $lines[0]
@@ -330,7 +347,7 @@ function Get-MergedOEsFromRow {
 
 function Add-OriginalColumns {
     param (
-        [ordered]$NewRow,
+        $NewRow,
         $OriginalRow,
         [int]$StartIndex,
         [int]$EndIndex
@@ -416,14 +433,14 @@ function Get-RegulationGroups {
             $columnCText = (Clean-Value $columnC).Trim()
         }
 
-        if (-not (Test-IsValidColumnC $columnCText)) {
+        if (-not (Test-IsValidColumnC -Text $columnCText)) {
             continue
         }
 
-        if (Test-IsRegulationStart $columnCText) {
+        if (Test-IsRegulationStart -Text $columnCText) {
             $currentGroup = [PSCustomObject]@{
                 Name      = $columnCText
-                SheetName = Get-RegulationSheetName $columnCText
+                SheetName = Get-RegulationSheetName -Text $columnCText
                 Rows      = @()
             }
 
