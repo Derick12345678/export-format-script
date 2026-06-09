@@ -22,7 +22,12 @@ $folder = Split-Path $InputFile
 $fileNameWithoutExtension = [System.IO.Path]::GetFileNameWithoutExtension($InputFile)
 
 $timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
+
+# Final output goes beside the original Excel file
 $outputFile = Join-Path $folder "$fileNameWithoutExtension`_formatted_$timestamp.xlsx"
+
+# Temporary output is created locally first to avoid network-drive save issues
+$tempOutputFile = Join-Path $env:TEMP "$fileNameWithoutExtension`_formatted_$timestamp.xlsx"
 
 # Read Excel normally so headers are preserved
 $data = Import-Excel -Path $InputFile
@@ -418,15 +423,20 @@ if ($regulations.Count -eq 0) {
     exit 1
 }
 
+# Remove existing files if needed
 if (Test-Path $outputFile) {
     Remove-Item $outputFile -Force
 }
 
+if (Test-Path $tempOutputFile) {
+    Remove-Item $tempOutputFile -Force
+}
+
 # STEP 3:
-# Create one Excel package, add all regulation sheets, then save once at the end
+# Create one Excel package locally, add all regulation sheets, then save once at the end
 $usedSheetNames = @{}
 
-$excelPackage = Open-ExcelPackage -Path $outputFile -Create
+$excelPackage = Open-ExcelPackage -Path $tempOutputFile -Create
 
 try {
     foreach ($regulation in $regulations) {
@@ -475,6 +485,14 @@ try {
 }
 finally {
     Close-ExcelPackage -ExcelPackage $excelPackage
+}
+
+# Copy completed workbook from local temp folder back to the original folder
+Copy-Item -Path $tempOutputFile -Destination $outputFile -Force
+
+# Clean up local temp output file
+if (Test-Path $tempOutputFile) {
+    Remove-Item $tempOutputFile -Force
 }
 
 Write-Host "Formatted Excel file created:"
