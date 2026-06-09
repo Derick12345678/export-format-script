@@ -27,6 +27,67 @@ function Clean-ExcelValue {
     return $text
 }
 
+function Write-WorksheetManually {
+    param (
+        $ExcelPackage,
+        [string]$WorksheetName,
+        [array]$Rows
+    )
+
+    if ($null -eq $Rows -or $Rows.Count -eq 0) {
+        Write-Host "No rows to write for worksheet: $WorksheetName"
+        return
+    }
+
+    # Delete existing sheet with same name if it somehow exists
+    $existingSheet = $ExcelPackage.Workbook.Worksheets[$WorksheetName]
+    if ($null -ne $existingSheet) {
+        $ExcelPackage.Workbook.Worksheets.Delete($WorksheetName)
+    }
+
+    # Create worksheet
+    $worksheet = $ExcelPackage.Workbook.Worksheets.Add($WorksheetName)
+
+    # Get headers from first row
+    $headers = @($Rows[0].PSObject.Properties.Name)
+
+    # Write headers
+    for ($col = 0; $col -lt $headers.Count; $col++) {
+        $worksheet.Cells[1, $col + 1].Value = $headers[$col]
+        $worksheet.Cells[1, $col + 1].Style.Font.Bold = $true
+    }
+
+    # Write data rows
+    $rowNumber = 2
+
+    foreach ($row in $Rows) {
+        for ($col = 0; $col -lt $headers.Count; $col++) {
+            $header = $headers[$col]
+            $value = $row.PSObject.Properties[$header].Value
+
+            $worksheet.Cells[$rowNumber, $col + 1].Value = Clean-ExcelValue $value
+        }
+
+        $rowNumber++
+    }
+
+    # Freeze top row
+    $worksheet.View.FreezePanes(2, 1)
+
+    # Add autofilter
+    $lastRow = $Rows.Count + 1
+    $lastCol = $headers.Count
+
+    if ($lastRow -ge 1 -and $lastCol -ge 1) {
+        $worksheet.Cells[1, 1, $lastRow, $lastCol].AutoFilter = $true
+    }
+
+    # Basic width, safer than AutoSize
+    for ($col = 1; $col -le $lastCol; $col++) {
+        $worksheet.Column($col).Width = 20
+    }
+}
+
 # If only a file name is given, assume it is in the same folder as this script
 $scriptFolder = $PSScriptRoot
 
@@ -455,7 +516,7 @@ if (Test-Path $tempOutputFile) {
 }
 
 # STEP 3:
-# Create one Excel package locally, add all regulation sheets, then save once at the end
+# Create one Excel package locally, add all regulation sheets manually, then save once at the end
 $usedSheetNames = @{}
 
 $excelPackage = Open-ExcelPackage -Path $tempOutputFile -Create
@@ -487,7 +548,7 @@ try {
 
         $worksheetName = Get-SafeWorksheetName -Name $regulation.SheetName -UsedNames $usedSheetNames
 
-        Write-Host "Exporting worksheet: $worksheetName"
+        Write-Host "Writing worksheet manually: $worksheetName"
         Write-Host "Regulation '$($regulation.OriginalName)' max OE count: $maxOECount"
 
         $formattedRows = @()
@@ -496,12 +557,10 @@ try {
             $formattedRows += Convert-ToFormattedRow -OriginalRow $rowItem -MaxOECount $maxOECount
         }
 
-        $formattedRows | Export-Excel `
+        Write-WorksheetManually `
             -ExcelPackage $excelPackage `
             -WorksheetName $worksheetName `
-            -BoldTopRow `
-            -FreezeTopRow `
-            -AutoFilter
+            -Rows $formattedRows
     }
 }
 finally {
