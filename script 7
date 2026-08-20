@@ -1,0 +1,114 @@
+Sub CreateDOORSHierarchy()
+
+    Dim para As Paragraph
+    Dim txt As String
+    Dim headingNumber As String
+    Dim headingLevel As Integer
+    Dim re As Object
+    Dim matches As Object
+    Dim match As Object
+    Dim changedCount As Long
+
+    Set re = CreateObject("VBScript.RegExp")
+
+    ' Matches:
+    ' 1 Heading
+    ' 1.1 Heading
+    ' 1.1.1 Heading
+    ' 1.1.1.1 Heading
+    ' Also accepts: 1. Heading
+    re.Pattern = "^\s*(\d+(\.\d+){0,8}\.?)\s+.+"
+    re.IgnoreCase = True
+    re.Global = False
+
+    changedCount = 0
+
+    For Each para In ActiveDocument.Paragraphs
+
+        ' Skip text inside tables
+        If para.Range.Information(wdWithInTable) = False Then
+
+            txt = para.Range.Text
+
+            ' Remove Word paragraph/end characters
+            txt = Replace(txt, Chr(13), "")
+            txt = Replace(txt, Chr(7), "")
+            txt = Replace(txt, Chr(11), " ")
+            txt = Trim(txt)
+
+            If Len(txt) > 0 Then
+
+                If re.Test(txt) Then
+
+                    Set matches = re.Execute(txt)
+                    Set match = matches(0)
+
+                    headingNumber = match.SubMatches(0)
+
+                    ' Remove trailing period:
+                    ' "3." becomes "3"
+                    If Right(headingNumber, 1) = "." Then
+                        headingNumber = Left(headingNumber, _
+                                             Len(headingNumber) - 1)
+                    End If
+
+                    ' Determine hierarchy from number
+                    headingLevel = UBound(Split(headingNumber, ".")) + 1
+
+                    ' Word supports Heading 1 through Heading 9
+                    If headingLevel <= 9 Then
+
+                        ApplyHeadingStyle para, headingLevel
+
+                        changedCount = changedCount + 1
+
+                    End If
+
+                End If
+
+            End If
+
+        End If
+
+    Next para
+
+    MsgBox "DOORS hierarchy preparation complete." & vbCrLf & vbCrLf & _
+           changedCount & " headings were identified and styled."
+
+End Sub
+
+
+Sub ApplyHeadingStyle(ByVal para As Paragraph, ByVal level As Integer)
+
+    Select Case level
+
+        Case 1
+            para.Style = ActiveDocument.Styles(wdStyleHeading1)
+
+        Case 2
+            para.Style = ActiveDocument.Styles(wdStyleHeading2)
+
+        Case 3
+            para.Style = ActiveDocument.Styles(wdStyleHeading3)
+
+        Case 4
+            para.Style = ActiveDocument.Styles(wdStyleHeading4)
+
+        Case 5
+            para.Style = ActiveDocument.Styles(wdStyleHeading5)
+
+        Case 6
+            para.Style = ActiveDocument.Styles(wdStyleHeading6)
+
+        Case 7
+            para.Style = ActiveDocument.Styles(wdStyleHeading7)
+
+        Case 8
+            para.Style = ActiveDocument.Styles(wdStyleHeading8)
+
+        Case 9
+            para.Style = ActiveDocument.Styles(wdStyleHeading9)
+
+    End Select
+
+End Sub
