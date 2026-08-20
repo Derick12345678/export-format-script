@@ -1,0 +1,38 @@
+Sub ConvertTextBoxesToNormalText()
+
+    Dim shp As Shape
+    Dim txt As String
+    Dim rng As Range
+    Dim i As Long
+
+    ' Work backwards because shapes are being deleted
+    For i = ActiveDocument.Shapes.Count To 1 Step -1
+
+        Set shp = ActiveDocument.Shapes(i)
+
+        If shp.TextFrame.HasText Then
+
+            txt = shp.TextFrame.TextRange.Text
+
+            ' Remove the end-of-text-box character if present
+            If Len(txt) > 0 Then
+                If Right(txt, 1) = Chr(13) Then
+                    txt = Left(txt, Len(txt) - 1)
+                End If
+            End If
+
+            ' Insert the text near where the text box was anchored
+            Set rng = shp.Anchor.Duplicate
+            rng.Collapse wdCollapseStart
+
+            rng.InsertBefore txt & vbCr
+
+            shp.Delete
+
+        End If
+
+    Next i
+
+    MsgBox "Text boxes converted to normal text."
+
+End Sub
