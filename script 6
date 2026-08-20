@@ -1,47 +1,72 @@
-Sub DeleteNo47ContTextBoxes()
+Sub ExtractAllTextBoxesPreserveTables()
 
     Dim shp As Shape
+    Dim srcRange As Range
+    Dim destRange As Range
     Dim i As Long
-    Dim txt As String
-    Dim deletedCount As Long
 
-    deletedCount = 0
+    Dim extractedCount As Long
+    Dim tableBoxCount As Long
+    Dim failedCount As Long
 
-    ' Work backwards because shapes are being deleted
+    extractedCount = 0
+    tableBoxCount = 0
+    failedCount = 0
+
+    ' Work backwards because shapes will be deleted
     For i = ActiveDocument.Shapes.Count To 1 Step -1
 
         Set shp = ActiveDocument.Shapes(i)
 
-        ' Check that the shape contains text
         If shp.TextFrame.HasText Then
 
-            txt = shp.TextFrame.TextRange.Text
+            Set srcRange = shp.TextFrame.TextRange.Duplicate
 
-            ' Normalize paragraph breaks and manual line breaks
-            txt = Replace(txt, Chr(13), " ")
-            txt = Replace(txt, Chr(11), " ")
-            txt = Replace(txt, Chr(7), " ")
-
-            ' Remove extra spaces
-            txt = Trim(txt)
-
-            Do While InStr(txt, "  ") > 0
-                txt = Replace(txt, "  ", " ")
-            Loop
-
-            ' Delete text box if it contains:
-            ' No.
-            ' 47
-            ' (cont)
-            If LCase(txt) = LCase("No. 47 (cont)") Then
-                shp.Delete
-                deletedCount = deletedCount + 1
+            ' Count boxes containing tables
+            If srcRange.Tables.Count > 0 Then
+                tableBoxCount = tableBoxCount + 1
             End If
+
+            ' Destination = location where text box is anchored
+            Set destRange = shp.Anchor.Duplicate
+            destRange.Collapse Direction:=wdCollapseStart
+
+            On Error GoTo ExtractionFailed
+
+            ' Copy EVERYTHING in the text box.
+            ' This preserves tables, formatting, bold, etc.
+            srcRange.Copy
+
+            ' Paste into normal document body
+            destRange.PasteAndFormat wdFormatOriginalFormatting
+
+            ' Only delete the text box after successful paste
+            shp.Delete
+
+            extractedCount = extractedCount + 1
+
+ContinueLoop:
+            On Error GoTo 0
 
         End If
 
     Next i
 
-    MsgBox deletedCount & " text box(es) deleted."
+
+    MsgBox "Extraction complete." & vbCrLf & vbCrLf & _
+           "Text boxes extracted: " & extractedCount & vbCrLf & _
+           "Boxes containing tables: " & tableBoxCount & vbCrLf & _
+           "Failed/skipped: " & failedCount
+
+    Exit Sub
+
+
+ExtractionFailed:
+
+    failedCount = failedCount + 1
+
+    ' Do NOT delete the original text box if extraction failed
+    Err.Clear
+    Resume ContinueLoop
 
 End Sub
