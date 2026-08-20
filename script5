@@ -1,48 +1,50 @@
 Sub RemoveHeaderLineShapes()
 
-    Dim i As Long
     Dim sec As Section
     Dim hdr As HeaderFooter
     Dim ftr As HeaderFooter
     Dim shp As Shape
-    Dim removed As Long
+    Dim i As Long
+    Dim removedCount As Long
 
-    ' ==========================================
+    removedCount = 0
+
+    ' ------------------------------------------
     ' Remove line shapes from main document
-    ' ==========================================
-
+    ' ------------------------------------------
     For i = ActiveDocument.Shapes.Count To 1 Step -1
 
         Set shp = ActiveDocument.Shapes(i)
 
         If shp.Type = msoLine Then
             shp.Delete
-            removed = removed + 1
+            removedCount = removedCount + 1
         End If
 
     Next i
 
 
-    ' ==========================================
+    ' ------------------------------------------
     ' Remove line shapes from headers
-    ' ==========================================
-
+    ' ------------------------------------------
     For Each sec In ActiveDocument.Sections
 
         For Each hdr In sec.Headers
 
-            If hdr.Exists Then
+            If hdr.Exists = True Then
 
-                For i = hdr.Shapes.Count To 1 Step -1
+                If hdr.Range.ShapeRange.Count > 0 Then
 
-                    Set shp = hdr.Shapes(i)
+                    For i = hdr.Range.ShapeRange.Count To 1 Step -1
 
-                    If shp.Type = msoLine Then
-                        shp.Delete
-                        removed = removed + 1
-                    End If
+                        If hdr.Range.ShapeRange(i).Type = msoLine Then
+                            hdr.Range.ShapeRange(i).Delete
+                            removedCount = removedCount + 1
+                        End If
 
-                Next i
+                    Next i
+
+                End If
 
             End If
 
@@ -51,26 +53,27 @@ Sub RemoveHeaderLineShapes()
     Next sec
 
 
-    ' ==========================================
+    ' ------------------------------------------
     ' Remove line shapes from footers
-    ' ==========================================
-
+    ' ------------------------------------------
     For Each sec In ActiveDocument.Sections
 
         For Each ftr In sec.Footers
 
-            If ftr.Exists Then
+            If ftr.Exists = True Then
 
-                For i = ftr.Shapes.Count To 1 Step -1
+                If ftr.Range.ShapeRange.Count > 0 Then
 
-                    Set shp = ftr.Shapes(i)
+                    For i = ftr.Range.ShapeRange.Count To 1 Step -1
 
-                    If shp.Type = msoLine Then
-                        shp.Delete
-                        removed = removed + 1
-                    End If
+                        If ftr.Range.ShapeRange(i).Type = msoLine Then
+                            ftr.Range.ShapeRange(i).Delete
+                            removedCount = removedCount + 1
+                        End If
 
-                Next i
+                    Next i
+
+                End If
 
             End If
 
@@ -79,6 +82,6 @@ Sub RemoveHeaderLineShapes()
     Next sec
 
 
-    MsgBox removed & " line shapes removed."
+    MsgBox removedCount & " line shapes were removed."
 
-End Subs
+End Sub
