@@ -1,0 +1,81 @@
+Sub CleanPDFArtifacts()
+
+    Dim rngStory As Range
+    Dim rng As Range
+    Dim shp As Shape
+    Dim txt As String
+    Dim i As Long
+    Dim re As Object
+
+    ' ==========================================
+    ' PART 1: Delete every occurrence of "No.47"
+    ' ==========================================
+
+    For Each rngStory In ActiveDocument.StoryRanges
+
+        Set rng = rngStory.Duplicate
+
+        Do
+            With rng.Find
+                .ClearFormatting
+                .Replacement.ClearFormatting
+                .Text = "No.47"
+                .Replacement.Text = ""
+                .Forward = True
+                .Wrap = wdFindContinue
+                .Format = False
+                .MatchCase = True
+                .MatchWholeWord = False
+                .MatchWildcards = False
+            End With
+
+            rng.Find.Execute Replace:=wdReplaceAll
+
+            ' Check linked story ranges as well
+            Set rng = rng.NextStoryRange
+
+        Loop Until rng Is Nothing
+
+    Next rngStory
+
+
+    ' =====================================================
+    ' PART 2: Delete text boxes starting with "Page x of 47"
+    ' =====================================================
+
+    Set re = CreateObject("VBScript.RegExp")
+
+    With re
+        .Pattern = "^\s*Page\s+\d+\s+of\s+47"
+        .IgnoreCase = True
+        .Global = False
+    End With
+
+    ' Work backwards because shapes are being deleted
+    For i = ActiveDocument.Shapes.Count To 1 Step -1
+
+        Set shp = ActiveDocument.Shapes(i)
+
+        If shp.TextFrame.HasText Then
+
+            txt = shp.TextFrame.TextRange.Text
+
+            ' Remove Word's end-of-text-box characters
+            txt = Replace(txt, Chr(13), " ")
+            txt = Replace(txt, Chr(7), " ")
+            txt = Trim(txt)
+
+            If re.Test(txt) Then
+                shp.Delete
+            End If
+
+        End If
+
+    Next i
+
+
+    MsgBox "Cleanup complete." & vbCrLf & _
+           "- Removed all instances of No.47" & vbCrLf & _
+           "- Removed Page x of 47 text boxes"
+
+End Sub
