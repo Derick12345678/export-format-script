@@ -1,0 +1,47 @@
+Sub DeleteNo47ContTextBoxes()
+
+    Dim shp As Shape
+    Dim i As Long
+    Dim txt As String
+    Dim deletedCount As Long
+
+    deletedCount = 0
+
+    ' Work backwards because shapes are being deleted
+    For i = ActiveDocument.Shapes.Count To 1 Step -1
+
+        Set shp = ActiveDocument.Shapes(i)
+
+        ' Check that the shape contains text
+        If shp.TextFrame.HasText Then
+
+            txt = shp.TextFrame.TextRange.Text
+
+            ' Normalize paragraph breaks and manual line breaks
+            txt = Replace(txt, Chr(13), " ")
+            txt = Replace(txt, Chr(11), " ")
+            txt = Replace(txt, Chr(7), " ")
+
+            ' Remove extra spaces
+            txt = Trim(txt)
+
+            Do While InStr(txt, "  ") > 0
+                txt = Replace(txt, "  ", " ")
+            Loop
+
+            ' Delete text box if it contains:
+            ' No.
+            ' 47
+            ' (cont)
+            If LCase(txt) = LCase("No. 47 (cont)") Then
+                shp.Delete
+                deletedCount = deletedCount + 1
+            End If
+
+        End If
+
+    Next i
+
+    MsgBox deletedCount & " text box(es) deleted."
+
+End Sub
